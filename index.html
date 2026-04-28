@@ -1758,6 +1758,283 @@ function admClearProductOverrides(){
 let _admTT;
 function admToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('on');clearTimeout(_admTT);_admTT=setTimeout(()=>t.classList.remove('on'),3000);}
 </script>
+
+<!-- ═══════════════════════════════════════════════════════
+     FIREBASE v10 — CLOUD SYNC FOR CUSTOM PRODUCTS
+     ═══════════════════════════════════════════════════════ -->
+<script type="module">
+// ── (1) FIREBASE CONFIG ──────────────────────────────────
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getFirestore,
+  collection,
+  getDocs,
+  addDoc,
+  deleteDoc,
+  doc,
+  setDoc,
+  onSnapshot,
+  query,
+  orderBy
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBKYeOI3eVekHjt4BLHI3bKVnfBb6s6MO0",
+  authDomain: "easy-shopping-9d070.firebaseapp.com",
+  projectId: "easy-shopping-9d070",
+  storageBucket: "easy-shopping-9d070.firebasestorage.app",
+  messagingSenderId: "701005138017",
+  appId: "1:701005138017:web:fd2f014e1df8508bd80220",
+  measurementId: "G-HERFZD1T1C"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const PROD_COL = "products";
+
+// ── (2) LOAD FIRESTORE PRODUCTS ON PAGE LOAD ─────────────
+// Called once on init — fetches all cloud custom products
+// and merges them into localStorage CP, then re-renders
+async function loadFirestoreProducts() {
+  try {
+    const snap = await getDocs(collection(db, PROD_COL));
+    const cloudProds = [];
+    snap.forEach(docSnap => {
+      const data = docSnap.data();
+      cloudProds.push({ ...data, _fsId: docSnap.id, custom: true });
+    });
+    // Merge: keep only local prods NOT in Firestore, then add all cloud ones
+    // (Firestore is the source of truth for custom products)
+    localStorage.setItem('cp', JSON.stringify(cloudProds));
+    CP = cloudProds;
+    // Re-render home if already visible
+    if (document.getElementById('app').classList.contains('show')) {
+      initHome();
+    }
+    console.log('[Firebase] Loaded', cloudProds.length, 'custom products from Firestore');
+  } catch (e) {
+    console.error('[Firebase] Failed to load products:', e);
+  }
+}
+
+// ── (3) REALTIME LISTENER — auto-refresh for all users ───
+// onSnapshot fires whenever ANY product is added/deleted/edited
+// so all open tabs/browsers update instantly without reload
+function startRealtimeSync() {
+  try {
+    const q = query(collection(db, PROD_COL));
+    onSnapshot(q, (snap) => {
+      const cloudProds = [];
+      snap.forEach(docSnap => {
+        cloudProds.push({ ...docSnap.data(), _fsId: docSnap.id, custom: true });
+      });
+      localStorage.setItem('cp', JSON.stringify(cloudProds));
+      CP = cloudProds;
+      // Silently refresh product display
+      if (typeof initHome === 'function' && document.getElementById('app').classList.contains('show')) {
+        initHome();
+      }
+      console.log('[Firebase] Realtime sync:', cloudProds.length, 'products');
+    }, (e) => {
+      console.error('[Firebase] Realtime sync error:', e);
+    });
+  } catch (e) {
+    console.error('[Firebase] Could not start realtime sync:', e);
+  }
+}
+
+// ── (4) SAVE NEW PRODUCT TO FIRESTORE ────────────────────
+// Wraps the existing admDoAddProd() — intercepts and also
+// saves to Firestore, then refreshes the admin product list
+async function saveProductToFirestore(prodData) {
+  try {
+    const docRef = await addDoc(collection(db, PROD_COL), prodData);
+    console.log('[Firebase] Product saved with ID:', docRef.id);
+    return docRef.id;
+  } catch (e) {
+    console.error('[Firebase] Failed to save product:', e);
+    return null;
+  }
+}
+
+// ── (5) DELETE PRODUCT FROM FIRESTORE ────────────────────
+async function deleteProductFromFirestore(fsId) {
+  if (!fsId) return;
+  try {
+    await deleteDoc(doc(db, PROD_COL, fsId));
+    console.log('[Firebase] Deleted product:', fsId);
+  } catch (e) {
+    console.error('[Firebase] Failed to delete product:', e);
+  }
+}
+
+// ── (6) UPDATE PRODUCT IN FIRESTORE ──────────────────────
+async function updateProductInFirestore(fsId, updatedData) {
+  if (!fsId) return;
+  try {
+    await setDoc(doc(db, PROD_COL, fsId), updatedData, { merge: true });
+    console.log('[Firebase] Updated product:', fsId);
+  } catch (e) {
+    console.error('[Firebase] Failed to update product:', e);
+  }
+}
+
+// ── (7) OVERRIDE admDoAddProd — save to cloud ────────────
+// Replace the existing localStorage-only function with
+// a cloud-aware version that does BOTH
+window._origAdmDoAddProd = window.admDoAddProd;
+window.admDoAddProd = async function() {
+  const n = (document.getElementById('apN') || {}).value?.trim() || '';
+  const mrp = +document.getElementById('apMrp').value;
+  const sp = +document.getElementById('apSp').value;
+  const i1 = (document.getElementById('apI1') || {}).value?.trim() || '';
+  if (!n) { admToast('Enter product name!'); return; }
+  if (!mrp || !sp) { admToast('Enter MRP and selling price!'); return; }
+  if (!i1) { admToast('Enter at least one image URL!'); return; }
+
+  const disc = +document.getElementById('apD').value || Math.round((1 - sp / mrp) * 100);
+  const stock = +document.getElementById('apSt').value || 10;
+  const oos = document.getElementById('apOos').checked;
+  const admGv = id => (document.getElementById(id) || {}).value?.trim() || '';
+  const i2 = admGv('apI2') || i1;
+  const i3 = admGv('apI3') || i1;
+
+  const newProd = {
+    id: Date.now(),
+    name: n,
+    brand: admGv('apB') || 'StyleZone',
+    category: document.getElementById('apC').value,
+    mrp, price: sp, discount: disc,
+    rating: 4.2, reviews: 0,
+    images: [i1, i2, i3],
+    description: admGv('apDesc') || `Premium ${n}`,
+    stock,
+    sku: admGv('apSku') || 'SKU-' + Date.now(),
+    custom: true,
+    outOfStock: oos,
+    createdAt: Date.now()
+  };
+
+  admToast('⏳ Saving to cloud...');
+
+  // Save to Firestore (source of truth)
+  const fsId = await saveProductToFirestore(newProd);
+  if (fsId) {
+    newProd._fsId = fsId;
+    // Also update localStorage immediately for instant local display
+    const cp = JSON.parse(localStorage.getItem('cp') || '[]');
+    cp.push(newProd);
+    localStorage.setItem('cp', JSON.stringify(cp));
+    CP = cp;
+
+    // Clear form fields
+    ['apN','apB','apMrp','apSp','apD','apSt','apSku','apI1','apI2','apI3','apDesc'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    document.getElementById('apOos').checked = false;
+
+    admRenderProducts();
+    initHome(); // refresh storefront immediately
+    admToast('✅ Product added! Visible to ALL users instantly.');
+  } else {
+    admToast('⚠️ Cloud save failed. Saved locally only.');
+    // Fallback to local-only save
+    const cp = JSON.parse(localStorage.getItem('cp') || '[]');
+    cp.push(newProd);
+    localStorage.setItem('cp', JSON.stringify(cp));
+    CP = cp;
+    ['apN','apB','apMrp','apSp','apD','apSt','apSku','apI1','apI2','apI3','apDesc'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    admRenderProducts();
+  }
+};
+
+// ── (8) OVERRIDE admDelProd — delete from cloud too ──────
+window._origAdmDelProd = window.admDelProd;
+window.admDelProd = async function(id) {
+  if (!confirm('Delete this product permanently? This will remove it for ALL users.')) return;
+  const cp = admGetCP();
+  const prod = cp.find(p => p.id === id);
+  const fsId = prod?._fsId;
+
+  // Delete from Firestore
+  if (fsId) await deleteProductFromFirestore(fsId);
+
+  // Delete from localStorage
+  const updated = cp.filter(p => p.id !== id);
+  admSaveCP(updated);
+  admRenderProducts();
+  initHome();
+  admToast('🗑️ Product deleted from cloud!');
+};
+
+// ── (9) OVERRIDE admSaveEditProd — sync edits to cloud ───
+window._origAdmSaveEditProd = window.admSaveEditProd;
+window.admSaveEditProd = async function() {
+  const id = +document.getElementById('epId').value;
+  const type = document.getElementById('epType').value;
+  const name = document.getElementById('epName').value.trim();
+  const mrp = +document.getElementById('epMrp').value;
+  const sp = +document.getElementById('epSp').value;
+  if (!name) { admToast('Enter product name!'); return; }
+  if (!mrp || !sp) { admToast('Enter MRP and price!'); return; }
+  const disc = +document.getElementById('epDisc').value || Math.round((1 - sp / mrp) * 100);
+  const stock = +document.getElementById('epStock').value || 0;
+  const oos = document.getElementById('epOos').checked || (stock <= 0);
+  const i1 = document.getElementById('epI1').value.trim();
+  const i2 = document.getElementById('epI2').value.trim();
+  const i3 = document.getElementById('epI3').value.trim();
+  const images = [
+    i1 || `https://picsum.photos/seed/${id}/500/500`,
+    i2 || (i1 || `https://picsum.photos/seed/${id + 50}/500/500`),
+    i3 || (i1 || `https://picsum.photos/seed/${id + 150}/500/500`)
+  ];
+  const updated = {
+    name, brand: document.getElementById('epBrand').value.trim(),
+    category: document.getElementById('epCat').value,
+    mrp, price: sp, discount: disc, stock,
+    sku: document.getElementById('epSku').value.trim(), images,
+    description: document.getElementById('epDesc').value.trim(),
+    outOfStock: oos
+  };
+
+  if (type === 'custom') {
+    const cp = admGetCP();
+    const idx = cp.findIndex(p => p.id === id);
+    if (idx >= 0) {
+      const fsId = cp[idx]._fsId;
+      cp[idx] = { ...cp[idx], ...updated };
+      admSaveCP(cp);
+      // Sync to Firestore
+      if (fsId) await updateProductInFirestore(fsId, updated);
+    }
+  } else {
+    // Base product override — stays in localStorage
+    const ov = admGetBPOv();
+    ov[id] = { ...(ov[id] || {}), ...updated };
+    admSaveBPOv(ov);
+  }
+
+  admCloseEdit();
+  admRenderProducts();
+  initHome();
+  admToast('✅ Product updated! Changes live for all users.');
+};
+
+// ── (10) INIT: load cloud products then start realtime ───
+// Wait for app to be fully initialized first
+setTimeout(async () => {
+  await loadFirestoreProducts();
+  startRealtimeSync();
+}, 3500);
+
+// Expose helpers to global scope for potential future use
+window._fbDeleteProduct = deleteProductFromFirestore;
+window._fbUpdateProduct = updateProductInFirestore;
+window._fbSaveProduct = saveProductToFirestore;
+
+</script>
 </body>
 </html>
 
